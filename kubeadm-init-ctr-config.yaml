@@ -1,0 +1,33 @@
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: 192.168.10.100
+  bindPort: 6443
+nodeRegistration:
+  criSocket: unix:///run/containerd/containerd.sock
+  kubeletExtraArgs:
+    cgroup-driver: systemd
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: v1.33.2
+controlPlaneEndpoint: 192.168.10.100:6443
+networking:
+  serviceSubnet: 10.96.0.0/12
+  podSubnet: 172.30.0.0/16
+apiServer:
+  advertiseAddress: 192.168.10.100
+  bindPort: 6443
+controllerManager: {}
+scheduler: {}
+etcd:
+  local:
+    dataDir: /var/lib/etcd
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+---
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+mode: iptables
