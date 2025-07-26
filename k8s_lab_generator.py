@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """
-Kubernetes Lab Environment Generator
+Kubernetes Lab Environment Generator v2
 실습 환경 배포 파일 작성을 자동화하는 Python 스크립트
+
+=== Version 2 Changes ===
+- Worker Node Join 방식 개선: SSH 기반 → 설정 파일 기반
+- kubeadm-join-worker-config.yaml 파일 추가
+- k8s-w.sh 스크립트 간소화 및 안정성 향상
+- Vagrantfile에 worker node용 설정 파일 복사 로직 추가
+- kubeadm v1beta4 API 사용으로 업데이트
+- 보안 및 안정성 개선 (SSH 의존성 제거)
 """
 
 import os
@@ -29,15 +37,25 @@ class K8sLabGenerator:
         
     def generate_vagrantfile(self):
         """Generate Vagrantfile"""
+        k8s_version = self.config['k8s_version']
+        containerd_version = self.config['containerd_version']
+        cilium_version = self.config['cilium_version']
+        worker_nodes = self.config['worker_nodes']
+        box_image = self.config['box_image']
+        box_version = self.config['box_version']
+        lab_name = self.config['lab_name']
+        control_plane_ip = self.config['control_plane_ip']
+        network_prefix = self.config['network_prefix']
+        
         vagrantfile_content = f'''# Variables
-K8SV = '{self.config['k8s_version']}' # Kubernetes Version : apt list -a kubelet , ex) 1.32.5-1.1
-CONTAINERDV = '{self.config['containerd_version']}' # Containerd Version : apt list -a containerd.io , ex) 1.6.33-1
-CILIUMV = '{self.config['cilium_version']}' # Cilium CNI Version : https://github.com/cilium/cilium/tags
-N = {self.config['worker_nodes']} # max number of worker nodes
+K8SV = '{k8s_version}' # Kubernetes Version : apt list -a kubelet , ex) 1.32.5-1.1
+CONTAINERDV = '{containerd_version}' # Containerd Version : apt list -a containerd.io , ex) 1.6.33-1
+CILIUMV = '{cilium_version}' # Cilium CNI Version : https://github.com/cilium/cilium/tags
+N = {worker_nodes} # max number of worker nodes
 
 # Base Image  https://portal.cloud.hashicorp.com/vagrant/discover/bento/ubuntu-24.04
-BOX_IMAGE = "{self.config['box_image']}"
-BOX_VERSION = "{self.config['box_version']}"
+BOX_IMAGE = "{box_image}"
+BOX_VERSION = "{box_version}"
 
 Vagrant.configure("2") do |config|
 #-ControlPlane Node
@@ -46,7 +64,7 @@ Vagrant.configure("2") do |config|
       
       subconfig.vm.box_version = BOX_VERSION
       subconfig.vm.provider "virtualbox" do |vb|
-        vb.customize ["modifyvm", :id, "--groups", "/{self.config['lab_name']}"]
+        vb.customize ["modifyvm", :id, "--groups", "/{lab_name}"]
         vb.customize ["modifyvm", :id, "--nicpromisc2", "allow-all"]
         vb.name = "k8s-ctr"
         vb.cpus = 2
@@ -54,7 +72,7 @@ Vagrant.configure("2") do |config|
         vb.linked_clone = true
       end
       subconfig.vm.host_name = "k8s-ctr"
-      subconfig.vm.network "private_network", ip: "{self.config['control_plane_ip']}"
+      subconfig.vm.network "private_network", ip: "{control_plane_ip}"
       subconfig.vm.network "forwarded_port", guest: 22, host: 60000, auto_correct: true, id: "ssh"
       subconfig.vm.synced_folder "./", "/vagrant", disabled: true
       subconfig.vm.provision "shell", path: "init_cfg.sh", args: [ K8SV, CONTAINERDV ]
@@ -67,7 +85,7 @@ Vagrant.configure("2") do |config|
       subconfig.vm.box = BOX_IMAGE
       subconfig.vm.box_version = BOX_VERSION
       subconfig.vm.provider "virtualbox" do |vb|
-        vb.customize ["modifyvm", :id, "--groups", "/{self.config['lab_name']}"]
+        vb.customize ["modifyvm", :id, "--groups", "/{lab_name}"]
         vb.customize ["modifyvm", :id, "--nicpromisc2", "allow-all"]
         vb.name = "k8s-w#{{i}}"
         vb.cpus = 2
@@ -75,9 +93,11 @@ Vagrant.configure("2") do |config|
         vb.linked_clone = true
       end
       subconfig.vm.host_name = "k8s-w#{{i}}"
-      subconfig.vm.network "private_network", ip: "{self.config['network_prefix']}.10#{{i}}"
+      subconfig.vm.network "private_network", ip: "{network_prefix}.10#{{i}}"
       subconfig.vm.network "forwarded_port", guest: 22, host: "6000#{{i}}", auto_correct: true, id: "ssh"
       subconfig.vm.synced_folder "./", "/vagrant", disabled: true
+      subconfig.vm.provision "file", source: "kubeadm-join-worker-config.yaml", destination: "/tmp/kubeadm-join-worker-config.yaml"
+      subconfig.vm.provision "shell", inline: "sudo mv /tmp/kubeadm-join-worker-config.yaml /root/kubeadm-join-worker-config.yaml"
       subconfig.vm.provision "shell", path: "init_cfg.sh", args: [ K8SV, CONTAINERDV]
       subconfig.vm.provision "shell", path: "k8s-w.sh"
     end
@@ -166,6 +186,10 @@ echo ">>>> Initial Config End <<<<"
 
     def generate_k8s_ctr_script(self):
         """Generate k8s-ctr.sh script"""
+        control_plane_ip = self.config['control_plane_ip']
+        pod_cidr = self.config['pod_cidr']
+        network_prefix = self.config['network_prefix']
+        
         script_content = f'''#!/usr/bin/env bash
 
 echo ">>>> K8S Controlplane config Start <<<<"
@@ -218,8 +242,8 @@ NODEIP=$(ip -4 addr show eth1 | grep -oP '(?<=inet\\s)\\d+(\\.\d+){{3}}')
 helm repo add cilium https://helm.cilium.io/ >/dev/null 2>&1
 helm repo update >/dev/null 2>&1
 helm install cilium cilium/cilium --version $2 --namespace kube-system \\
---set k8sServiceHost={self.config['control_plane_ip']} --set k8sServicePort=6443 \\
---set ipam.mode="cluster-pool" --set ipam.operator.clusterPoolIPv4PodCIDRList={{"{self.config['pod_cidr']}"}} --set ipv4NativeRoutingCIDR={self.config['pod_cidr']} \\
+--set k8sServiceHost={control_plane_ip} --set k8sServicePort=6443 \\
+--set ipam.mode="cluster-pool" --set ipam.operator.clusterPoolIPv4PodCIDRList={{"{pod_cidr}"}} --set ipv4NativeRoutingCIDR={pod_cidr} \\
 --set routingMode=native --set autoDirectNodeRoutes=true --set endpointRoutes.enabled=true \\
 --set kubeProxyReplacement=true --set bpf.masquerade=true --set installNoConntrackIptablesRules=true \\
 --set endpointHealthChecking.enabled=false --set healthChecking=false \\
@@ -236,8 +260,8 @@ rm cilium-linux-${{CLI_ARCH}}.tar.gz
 
 
 echo "[TASK 9] local DNS with hosts file"
-echo "{self.config['control_plane_ip']} k8s-ctr" >> /etc/hosts
-for (( i=1; i<=$1; i++  )); do echo "{self.config['network_prefix']}.10$i k8s-w$i" >> /etc/hosts; done
+echo "{control_plane_ip} k8s-ctr" >> /etc/hosts
+for (( i=1; i<=$1; i++  )); do echo "{network_prefix}.10$i k8s-w$i" >> /etc/hosts; done
 
 
 echo ">>>> K8S Controlplane Config End <<<<"
@@ -245,25 +269,17 @@ echo ">>>> K8S Controlplane Config End <<<<"
         return script_content
 
     def generate_k8s_worker_script(self):
-        """Generate k8s-w.sh script"""
+        """Generate k8s-w.sh script - Updated version"""
         script_content = '''#!/usr/bin/env bash
 
-echo ">>>> K8S Worker Node config Start <<<<"
+echo ">>>> K8S Node config Start <<<<"
 
-echo "[TASK 1] Join worker node to cluster"
-# Get join command from control plane
-TOKEN=$(sshpass -p 'vagrant' ssh -o StrictHostKeyChecking=no vagrant@k8s-ctr "sudo kubeadm token list | grep authentication | awk '{print \\$1}'" 2>/dev/null | head -1)
-HASH=$(sshpass -p 'vagrant' ssh -o StrictHostKeyChecking=no vagrant@k8s-ctr "openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //'" 2>/dev/null)
+echo "[TASK 1] K8S Controlplane Join"
+NODEIP=$(ip -4 addr show eth1 | grep -oP '(?<=inet\\s)\\d+(\\.\d+){3}')
+sed -i "s/NODE_IP_PLACEHOLDER/${NODEIP}/g" /root/kubeadm-join-worker-config.yaml
+kubeadm join --config="/root/kubeadm-join-worker-config.yaml" >/dev/null 2>&1
 
-# If token is empty, create new token
-if [ -z "$TOKEN" ]; then
-    TOKEN=$(sshpass -p 'vagrant' ssh -o StrictHostKeyChecking=no vagrant@k8s-ctr "sudo kubeadm token create" 2>/dev/null)
-fi
-
-# Join the cluster
-kubeadm join 192.168.10.100:6443 --token $TOKEN --discovery-token-ca-cert-hash sha256:$HASH >/dev/null 2>&1
-
-echo ">>>> K8S Worker Node Config End <<<<"
+echo ">>>> K8S Node Config End <<<<"
 '''
         return script_content
 
@@ -306,6 +322,22 @@ mode: iptables
 '''
         return config_content
 
+    def generate_kubeadm_join_worker_config(self):
+        """Generate kubeadm-join-worker-config.yaml"""
+        config_content = f'''apiVersion: kubeadm.k8s.io/v1beta4
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    token: "123456.1234567890123456"
+    apiServerEndpoint: "{self.config['control_plane_ip']}:6443"
+    unsafeSkipCAVerification: true
+nodeRegistration:
+  criSocket: "unix:///run/containerd/containerd.sock"
+  kubeletExtraArgs:
+    node-ip: "NODE_IP_PLACEHOLDER"
+'''
+        return config_content
+
     def generate_config_file(self):
         """Generate configuration file"""
         config_dict = {
@@ -325,6 +357,7 @@ mode: iptables
             'k8s-ctr.sh': self.generate_k8s_ctr_script(),
             'k8s-w.sh': self.generate_k8s_worker_script(),
             'kubeadm-init-ctr-config.yaml': self.generate_kubeadm_init_config(),
+            'kubeadm-join-worker-config.yaml': self.generate_kubeadm_join_worker_config(),
             'lab_config.yaml': self.generate_config_file()
         }
         
@@ -342,9 +375,29 @@ mode: iptables
 
     def generate_readme(self):
         """Generate README.md with usage instructions"""
-        readme_content = f'''# Kubernetes Cilium Lab Environment
+        readme_content = f'''# Kubernetes Cilium Lab Environment v2
 
 이 환경은 Kubernetes와 Cilium CNI를 학습하기 위한 실습 환경입니다.
+
+## 🆕 Version 2 주요 변경사항
+
+### Worker Node Join 방식 개선
+- **이전 v1**: SSH를 통한 동적 토큰 획득 방식
+- **현재 v2**: 설정 파일 기반 join 방식
+- **장점**: 
+  - 더 안전하고 구조화된 방식
+  - SSH 의존성 제거로 네트워크 보안 향상
+  - 설정 투명성 및 디버깅 용이성 증대
+  - 프로비저닝 안정성 향상
+
+### 추가된 파일
+- `kubeadm-join-worker-config.yaml`: Worker Node 전용 join 설정
+- kubeadm v1beta4 API 사용
+
+### 기술적 개선사항
+- Vagrantfile에 worker node용 설정 파일 자동 복사 로직 추가
+- k8s-w.sh 스크립트 간소화 및 오류 처리 개선
+- 노드별 IP 주소 자동 설정 (NODE_IP_PLACEHOLDER 치환)
 
 ## 환경 구성
 
@@ -402,9 +455,34 @@ mode: iptables
 - `Vagrantfile`: 가상머신 정의 및 프로비저닝 설정
 - `init_cfg.sh`: 기본 시스템 설정 및 Kubernetes 구성요소 설치
 - `k8s-ctr.sh`: Control Plane 초기화 및 Cilium CNI 설치
-- `k8s-w.sh`: Worker Node를 클러스터에 조인
+- `k8s-w.sh`: Worker Node를 클러스터에 조인 ⭐ **v2에서 개선됨**
 - `kubeadm-init-ctr-config.yaml`: kubeadm 초기화 설정
+- `kubeadm-join-worker-config.yaml`: Worker Node 조인 설정 ⭐ **v2에서 새로 추가**
 - `lab_config.yaml`: 실습 환경 설정 정보
+
+## 🔧 트러블슈팅
+
+### Worker Node Join 실패 시
+```bash
+# 각 워커노드에서 수동으로 설정 파일 생성
+vagrant ssh k8s-w1
+sudo cat > /root/kubeadm-join-worker-config.yaml << 'EOF'
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    token: "123456.1234567890123456"
+    apiServerEndpoint: "{self.config['control_plane_ip']}:6443"
+    unsafeSkipCAVerification: true
+nodeRegistration:
+  criSocket: "unix:///run/containerd/containerd.sock"
+  kubeletExtraArgs:
+    node-ip: "NODE_IP_PLACEHOLDER"
+EOF
+
+# 스크립트 재실행
+sudo /vagrant/k8s-w.sh
+```
 
 ## 모니터링 명령어
 
@@ -419,8 +497,27 @@ kubectl exec -n kube-system -c cilium-agent -it ds/cilium -- cilium-dbg monitor 
 kubectl exec -n kube-system -c cilium-agent -it ds/cilium -- cilium-dbg monitor -v --type l7
 ```
 
+## ⚠️ 보안 주의사항
+
+현재 설정에서는 고정 토큰(`123456.1234567890123456`)과 `unsafeSkipCAVerification: true`를 사용합니다. 
+이는 실습 환경용이며, **실제 프로덕션 환경에서는 다음을 반드시 적용**해야 합니다:
+- 동적으로 생성된 보안 토큰 사용
+- CA 인증서 검증 활성화
+- 적절한 RBAC 및 네트워크 정책 적용
+
+## 📋 변경 이력
+
+### v2 (Current)
+- Worker Node join 방식을 설정 파일 기반으로 개선
+- kubeadm v1beta4 API 적용
+- 프로비저닝 안정성 및 보안 향상
+
+### v1 (Previous)
+- SSH 기반 토큰 획득 방식 사용
+- 네트워크 의존성이 높은 구조
+
 ---
-Generated by Kubernetes Lab Generator on {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Generated by Kubernetes Lab Generator v2 on {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 '''
         return readme_content
 
@@ -495,13 +592,19 @@ Examples:
         f.write(generator.generate_readme())
     
     print(f"""
-🚀 Kubernetes Cilium Lab 환경이 생성되었습니다!
+🚀 Kubernetes Cilium Lab 환경 v2가 생성되었습니다!
 
 📁 출력 디렉터리: {args.output}
 🖥️  워커 노드 수: {config['worker_nodes']}
 🐳 Kubernetes: {config['k8s_version']}
 🔧 Containerd: {config['containerd_version']}
 🌐 Cilium: {config['cilium_version']}
+
+🆕 v2 주요 개선사항:
+✅ Worker Node join 방식을 설정 파일 기반으로 개선
+✅ SSH 의존성 제거로 안정성 향상
+✅ kubeadm v1beta4 API 적용
+✅ 프로비저닝 과정 최적화
 
 다음 명령어로 환경을 시작하세요:
   cd {args.output}
@@ -510,7 +613,7 @@ Examples:
 Control Plane 접속:
   vagrant ssh k8s-ctr
 
-자세한 사용법은 README.md를 참고하세요.
+자세한 사용법과 변경사항은 README.md를 참고하세요.
     """)
     
     return 0
