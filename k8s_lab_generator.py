@@ -195,7 +195,7 @@ echo ">>>> Initial Config End <<<<"
 echo ">>>> K8S Controlplane config Start <<<<"
 
 echo "[TASK 1] Initial Kubernetes"
-curl --silent -o /root/kubeadm-init-ctr-config.yaml https://raw.githubusercontent.com/gasida/vagrant-lab/refs/heads/main/cilium-study/2w/kubeadm-init-ctr-config.yaml
+curl --silent -o /root/kubeadm-init-ctr-config.yaml https://raw.githubusercontent.com/riverjin839/cilium-study/refs/heads/main/kubeadm-init-ctr-config.yaml
 kubeadm init --config="/root/kubeadm-init-ctr-config.yaml" --skip-phases=addon/kube-proxy  >/dev/null 2>&1
 
 
@@ -276,6 +276,7 @@ echo ">>>> K8S Node config Start <<<<"
 
 echo "[TASK 1] K8S Controlplane Join"
 NODEIP=$(ip -4 addr show eth1 | grep -oP '(?<=inet\\s)\\d+(\\.\d+){3}')
+curl --silent -o /root/kubeadm-join-worker-config.yaml https://raw.githubusercontent.com/riverjin839/cilium-study/refs/heads/main/kubeadm-join-worker-config.yaml
 sed -i "s/NODE_IP_PLACEHOLDER/${NODEIP}/g" /root/kubeadm-join-worker-config.yaml
 kubeadm join --config="/root/kubeadm-join-worker-config.yaml" >/dev/null 2>&1
 
