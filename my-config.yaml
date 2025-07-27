@@ -6,3 +6,5 @@ lab_config:
   lab_name: 'Advanced-K8s-Lab'
   network_prefix: '192.168.20'
   pod_cidr: '172.30.0.0/16'
+  box_image: "bento/ubuntu-24.04"
+  box_version: "202502.21.0"
